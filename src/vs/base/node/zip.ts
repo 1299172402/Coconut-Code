@@ -230,9 +230,19 @@ export function extract(zipPath: string, targetPath: string, options: IExtractOp
 function read(zipPath: string, filePath: string): Promise<Readable> {
 	return openZip(zipPath).then(zipfile => {
 		return new Promise<Readable>((c, e) => {
+			const reject = (err: Error) => {
+				zipfile.close();
+				e(err);
+			};
+
+			zipfile.once('error', reject);
 			zipfile.on('entry', (entry: Entry) => {
 				if (entry.fileName === filePath) {
-					openZipStream(zipfile, entry).then(stream => c(stream), err => e(err));
+					openZipStream(zipfile, entry).then(stream => {
+						stream.once('end', () => zipfile.close());
+						stream.once('error', () => zipfile.close());
+						c(stream);
+					}, err => reject(err));
 				}
 			});
 
