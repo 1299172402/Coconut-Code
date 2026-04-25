@@ -5,6 +5,7 @@
 
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { Codicon } from '../../../../base/common/codicons.js';
 import { IRemoteAgentHostService, parseRemoteAgentHostInput, RemoteAgentHostEntryType, RemoteAgentHostInputValidationError, RemoteAgentHostsEnabledSettingId } from '../../../../platform/agentHost/common/remoteAgentHostService.js';
 import { ISSHRemoteAgentHostService, SSHAuthMethod, type ISSHAgentHostConfig, type ISSHAgentHostConnection, type ISSHResolvedConfig } from '../../../../platform/agentHost/common/sshRemoteAgentHost.js';
 import { ITunnelAgentHostService, TUNNEL_ADDRESS_PREFIX, type ITunnelInfo } from '../../../../platform/agentHost/common/tunnelAgentHost.js';
@@ -16,9 +17,11 @@ import { IViewsService } from '../../../../workbench/services/views/common/views
 import { IAuthenticationService } from '../../../../workbench/services/authentication/common/authentication.js';
 import { IProductService } from '../../../../platform/product/common/productService.js';
 import { SessionsCategories } from '../../../common/categories.js';
+import { Menus } from '../../../browser/menus.js';
 import { NewChatViewPane, SessionsViewId } from '../../chat/browser/newChatViewPane.js';
 import { ISessionsManagementService } from '../../../services/sessions/common/sessionsManagement.js';
 import { ISessionsProvidersService } from '../../../services/sessions/browser/sessionsProvidersService.js';
+import { IAgentHostSessionsProvider, isAgentHostProvider } from '../../../common/agentHostSessionsProvider.js';
 
 registerAction2(class extends Action2 {
 	constructor() {
@@ -150,16 +153,18 @@ async function promptToConnectViaSSH(
 			port = resolvedConfig.port !== 22 ? resolvedConfig.port : undefined;
 			suggestedName = picked.hostAlias;
 
-			// Determine auth method from resolved config
+			// Determine auth method from resolved config.
+			// Always prefer Agent auth (the SSH agent may already have the key
+			// loaded). Record a non-default IdentityFile as a fallback path for
+			// the manual picker only.
 			if (resolvedConfig.identityFile.length > 0) {
 				const firstKey = resolvedConfig.identityFile[0];
 				const defaultKeys = ['~/.ssh/id_rsa', '~/.ssh/id_ecdsa', '~/.ssh/id_ed25519', '~/.ssh/id_dsa', '~/.ssh/id_xmss'];
 				if (!defaultKeys.includes(firstKey)) {
-					defaultAuthMethod = SSHAuthMethod.KeyFile;
 					defaultKeyPath = firstKey;
 				}
 			}
-			// If no explicit key, default to SSH agent
+			// Default to SSH agent
 			if (!defaultAuthMethod) {
 				defaultAuthMethod = SSHAuthMethod.Agent;
 			}
@@ -172,6 +177,7 @@ async function promptToConnectViaSSH(
 					username,
 					authMethod: defaultAuthMethod,
 					privateKeyPath: defaultKeyPath,
+					agentForward: resolvedConfig.forwardAgent || undefined,
 					name: suggestedName,
 					sshConfigHost: picked.hostAlias,
 				};
@@ -361,9 +367,9 @@ async function promptForRemoteFolder(
 	const sessionsProvidersService = accessor.get(ISessionsProvidersService);
 	const sessionsManagementService = accessor.get(ISessionsManagementService);
 
-	// The provider is created synchronously during addSSHConnection's
+	// The provider is created synchronously during addManagedConnection's
 	// onDidChangeConnections event, so it should exist by now.
-	const provider = sessionsProvidersService.getProviders().find(p => p.remoteAddress === connection.localAddress);
+	const provider = sessionsProvidersService.getProviders().find((p): p is IAgentHostSessionsProvider => isAgentHostProvider(p) && p.remoteAddress === connection.localAddress);
 	if (!provider) {
 		return;
 	}
@@ -464,9 +470,15 @@ registerAction2(class extends Action2 {
 		super({
 			id: 'workbench.action.sessions.connectViaSSH',
 			title: localize2('connectViaSSH', "Connect to Remote Agent Host via SSH"),
+			shortTitle: localize2('connectViaSSHShort', "SSH..."),
 			category: SessionsCategories.Sessions,
 			f1: true,
+			icon: Codicon.remote,
 			precondition: ContextKeyExpr.equals(`config.${RemoteAgentHostsEnabledSettingId}`, true),
+			menu: {
+				id: Menus.SessionWorkspaceManage,
+				order: 20,
+			},
 		});
 	}
 
@@ -525,7 +537,9 @@ async function promptToConnectViaTunnel(
 		// Trigger interactive auth for the chosen provider
 		const scopes = productService.tunnelApplicationConfig?.authenticationProviders?.[authProvider]?.scopes ?? [];
 		try {
-			await authenticationService.createSession(authProvider, scopes, { activateImmediate: true });
+			if (!(await authenticationService.getSessions(authProvider, scopes)).length) {
+				await authenticationService.createSession(authProvider, scopes, { activateImmediate: true });
+			}
 		} catch {
 			notificationService.error(localize('tunnelAuthFailed', "Authentication failed. Please try again."));
 			return;
@@ -615,7 +629,7 @@ async function promptForTunnelFolder(
 
 	// The provider is created by TunnelAgentHostContribution when the
 	// tunnel is cached (via onDidChangeTunnels / _reconcileProviders).
-	const provider = sessionsProvidersService.getProviders().find(p => p.remoteAddress === tunnelAddress);
+	const provider = sessionsProvidersService.getProviders().find((p): p is IAgentHostSessionsProvider => isAgentHostProvider(p) && p.remoteAddress === tunnelAddress);
 	if (!provider) {
 		return;
 	}
@@ -641,9 +655,15 @@ registerAction2(class extends Action2 {
 		super({
 			id: 'workbench.action.sessions.connectViaTunnel',
 			title: localize2('connectViaTunnel', "Connect to Remote Agent Host via Dev Tunnel"),
+			shortTitle: localize2('connectViaTunnelShort', "Tunnels..."),
 			category: SessionsCategories.Sessions,
 			f1: true,
+			icon: Codicon.cloud,
 			precondition: ContextKeyExpr.equals(`config.${RemoteAgentHostsEnabledSettingId}`, true),
+			menu: {
+				id: Menus.SessionWorkspaceManage,
+				order: 10,
+			},
 		});
 	}
 

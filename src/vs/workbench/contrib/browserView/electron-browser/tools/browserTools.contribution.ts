@@ -9,11 +9,12 @@ import { localize } from '../../../../../nls.js';
 import { IPlaywrightService } from '../../../../../platform/browserView/common/playwrightService.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
+import { IAgentNetworkFilterService } from '../../../../../platform/networkFilter/common/networkFilterService.js';
 import { registerWorkbenchContribution2, WorkbenchPhase, type IWorkbenchContribution } from '../../../../common/contributions.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { IChatContextService } from '../../../chat/browser/contextContrib/chatContextService.js';
 import { ILanguageModelToolsService, ToolDataSource, ToolSet } from '../../../chat/common/tools/languageModelToolsService.js';
-import { BrowserEditorInput } from '../../common/browserEditorInput.js';
+import { IBrowserViewWorkbenchService } from '../../common/browserView.js';
 import { formatBrowserEditorList } from './browserToolHelpers.js';
 import { ClickBrowserTool, ClickBrowserToolData } from './clickBrowserTool.js';
 import { DragElementTool, DragElementToolData } from './dragElementTool.js';
@@ -44,6 +45,8 @@ class BrowserChatAgentToolsContribution extends Disposable implements IWorkbench
 		@IPlaywrightService private readonly playwrightService: IPlaywrightService,
 		@IChatContextService private readonly chatContextService: IChatContextService,
 		@IEditorService private readonly editorService: IEditorService,
+		@IBrowserViewWorkbenchService private readonly browserViewService: IBrowserViewWorkbenchService,
+		@IAgentNetworkFilterService private readonly agentNetworkFilterService: IAgentNetworkFilterService,
 	) {
 		super();
 
@@ -109,23 +112,20 @@ class BrowserChatAgentToolsContribution extends Disposable implements IWorkbench
 			this._trackedIds = new Set(ids);
 			this._updateBrowserContext();
 		}));
-		this._toolsStore.add(this.editorService.onDidEditorsChange(() => this._updateBrowserContext()));
+		this._toolsStore.add(this.browserViewService.onDidChangeBrowserViews(() => this._updateBrowserContext()));
+		this._toolsStore.add(this.agentNetworkFilterService.onDidChange(() => this._updateBrowserContext()));
 	}
 
 	private _updateBrowserContext(): void {
-		const trackedEditors: BrowserEditorInput[] = [];
-		for (const editor of this.editorService.editors) {
-			if (editor instanceof BrowserEditorInput && this._trackedIds.has(editor.id)) {
-				trackedEditors.push(editor);
-			}
-		}
+		const trackedBrowsers = [...this.browserViewService.getKnownBrowserViews().values()]
+			.filter(entry => this._trackedIds.has(entry.id));
 
-		if (trackedEditors.length === 0) {
+		if (trackedBrowsers.length === 0) {
 			this.chatContextService.updateWorkspaceContextItems(BrowserChatAgentToolsContribution.CONTEXT_ID, []);
 			return;
 		}
 
-		const list = formatBrowserEditorList(this.editorService, trackedEditors);
+		const list = formatBrowserEditorList(this.editorService, trackedBrowsers, { agentNetworkFilterService: this.agentNetworkFilterService });
 		this.chatContextService.updateWorkspaceContextItems(BrowserChatAgentToolsContribution.CONTEXT_ID, [{
 			handle: 0,
 			label: localize('browserContext.label', "Browser Pages"),

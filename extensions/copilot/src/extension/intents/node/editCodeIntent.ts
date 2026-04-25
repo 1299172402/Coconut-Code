@@ -421,7 +421,6 @@ export class EditCodeIntentInvocation implements IIntentInvocation {
 			// Don't report file references that came in via chat variables in an editing session, unless they have warnings,
 			// because they are already displayed as part of the working set
 			references: result.references.filter((ref) => this.shouldKeepReference(editCodeStep, ref, toolReferences, chatVariables)),
-			// telemetryData: result.metadata.getAll(DocumentToAstSelectionData)
 		};
 	}
 
@@ -499,13 +498,7 @@ export class EditCodeIntentInvocation implements IIntentInvocation {
 			}
 		}
 
-		const isReadonly = this.request.references.some(r => r.isReadonly && URI.isUri(r.value) && isEqual(r.value, uri));
-		if (isReadonly) {
-			return {
-				title: l10n.t`Allow edits to readonly file?`,
-				message: l10n.t`Do you want to allow edits to \`${this.workspaceService.asRelativePath(uri)}\`?`,
-			};
-		}
+		return undefined;
 	}
 
 	async processResponse?(context: IResponseProcessorContext, inputStream: AsyncIterable<IResponsePart>, outputStream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<vscode.ChatResult> {

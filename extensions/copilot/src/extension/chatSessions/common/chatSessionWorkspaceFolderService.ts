@@ -17,6 +17,10 @@ export const IChatSessionWorkspaceFolderService = createServiceIdentifier<IChatS
  */
 export interface IChatSessionWorkspaceFolderService {
 	readonly _serviceBrand: undefined;
+	/**
+	 * Triggered when the set of changes in a session workspace folder has changed.
+	 */
+	onDidChangeWorkspaceFolderChanges: vscode.Event<{ sessionId: string }>;
 	deleteTrackedWorkspaceFolder(sessionId: string): Promise<void>;
 	/**
 	 * Track workspace folder selection for a session (for folders without git repos in multi-root workspaces)
@@ -49,7 +53,16 @@ export interface IChatSessionWorkspaceFolderService {
 	getWorkspaceChanges(sessionId: string): Promise<readonly ChatSessionWorktreeFile[] | undefined>;
 
 	/**
-	 * Clear the cached changes for a workspace folder.
+	 * Clear the cached changes for a session.
+	 * Returns the affected session IDs.
 	 */
-	clearWorkspaceChanges(sessionId: string): void;
+	clearWorkspaceChanges(sessionId: string): string[];
+
+	/**
+	 * Clear cached changes for all sessions associated with a workspace folder.
+	 * Returns the affected session IDs.
+	 */
+	clearWorkspaceChanges(folderUri: vscode.Uri): string[];
+
+	hasCachedChanges(sessionId: string): Promise<boolean>;
 }

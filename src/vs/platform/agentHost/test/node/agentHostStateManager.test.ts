@@ -7,9 +7,11 @@ import assert from 'assert';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
+import { runWithFakedTimers } from '../../../../base/test/common/timeTravelScheduler.js';
 import { NullLogService } from '../../../log/common/log.js';
-import { ActionType, NotificationType, type IActionEnvelope, type INotification } from '../../common/state/sessionActions.js';
-import { ISessionSummary, ResponsePartKind, ROOT_STATE_URI, SessionLifecycle, SessionStatus, TurnState, type IMarkdownResponsePart, type ISessionState } from '../../common/state/sessionState.js';
+import { ActionType, NotificationType, type ActionEnvelope, type INotification } from '../../common/state/sessionActions.js';
+import { SessionSummary, ResponsePartKind, ROOT_STATE_URI, SessionLifecycle, SessionStatus, TurnState, buildSubagentSessionUri, isSubagentSession, parseSubagentSessionUri, type MarkdownResponsePart, type SessionState } from '../../common/state/sessionState.js';
+import { type SessionSummaryChangedNotification } from '../../common/state/protocol/notifications.js';
 import { AgentHostStateManager } from '../../node/agentHostStateManager.js';
 
 suite('AgentHostStateManager', () => {
@@ -18,7 +20,7 @@ suite('AgentHostStateManager', () => {
 	let manager: AgentHostStateManager;
 	const sessionUri = URI.from({ scheme: 'copilot', path: '/test-session' }).toString();
 
-	function makeSessionSummary(resource?: string): ISessionSummary {
+	function makeSessionSummary(resource?: string): SessionSummary {
 		return {
 			resource: resource ?? sessionUri,
 			provider: 'copilot',
@@ -26,6 +28,7 @@ suite('AgentHostStateManager', () => {
 			status: SessionStatus.Idle,
 			createdAt: Date.now(),
 			modifiedAt: Date.now(),
+			project: { uri: 'file:///test-project', displayName: 'Test Project' },
 		};
 	}
 
@@ -58,7 +61,11 @@ suite('AgentHostStateManager', () => {
 		const snapshot = manager.getSnapshot(ROOT_STATE_URI);
 		assert.ok(snapshot);
 		assert.strictEqual(snapshot.resource.toString(), ROOT_STATE_URI.toString());
-		assert.deepStrictEqual(snapshot.state, { agents: [], activeSessions: 0 });
+		const root = snapshot.state as { agents: unknown[]; activeSessions: number; config?: { values?: Record<string, unknown> } };
+		assert.deepStrictEqual(root.agents, []);
+		assert.strictEqual(root.activeSessions, 0);
+		// Host config is seeded with the platform root schema and defaults.
+		assert.ok(root.config, 'root state should include a seeded config');
 	});
 
 	test('getSnapshot returns session snapshot after creation', () => {
@@ -66,13 +73,13 @@ suite('AgentHostStateManager', () => {
 		const snapshot = manager.getSnapshot(sessionUri);
 		assert.ok(snapshot);
 		assert.strictEqual(snapshot.resource.toString(), sessionUri.toString());
-		assert.strictEqual((snapshot.state as ISessionState).lifecycle, SessionLifecycle.Creating);
+		assert.strictEqual((snapshot.state as SessionState).lifecycle, SessionLifecycle.Creating);
 	});
 
 	test('dispatchServerAction applies action and emits envelope', () => {
 		manager.createSession(makeSessionSummary());
 
-		const envelopes: IActionEnvelope[] = [];
+		const envelopes: ActionEnvelope[] = [];
 		disposables.add(manager.onDidEmitEnvelope(e => envelopes.push(e)));
 
 		manager.dispatchServerAction({
@@ -93,7 +100,7 @@ suite('AgentHostStateManager', () => {
 	test('serverSeq increments monotonically', () => {
 		manager.createSession(makeSessionSummary());
 
-		const envelopes: IActionEnvelope[] = [];
+		const envelopes: ActionEnvelope[] = [];
 		disposables.add(manager.onDidEmitEnvelope(e => envelopes.push(e)));
 
 		manager.dispatchServerAction({ type: ActionType.SessionReady, session: sessionUri });
@@ -108,7 +115,7 @@ suite('AgentHostStateManager', () => {
 	test('dispatchClientAction includes origin in envelope', () => {
 		manager.createSession(makeSessionSummary());
 
-		const envelopes: IActionEnvelope[] = [];
+		const envelopes: ActionEnvelope[] = [];
 		disposables.add(manager.onDidEmitEnvelope(e => envelopes.push(e)));
 
 		const origin = { clientId: 'renderer-1', clientSeq: 42 };
@@ -177,14 +184,16 @@ suite('AgentHostStateManager', () => {
 	test('root state starts with activeSessions: 0', () => {
 		const snapshot = manager.getSnapshot(ROOT_STATE_URI);
 		assert.ok(snapshot);
-		assert.deepStrictEqual(snapshot.state, { agents: [], activeSessions: 0 });
+		const root = snapshot.state as { agents: unknown[]; activeSessions: number };
+		assert.deepStrictEqual(root.agents, []);
+		assert.strictEqual(root.activeSessions, 0);
 	});
 
 	test('turnStarted dispatches root/activeSessionsChanged with correct count', () => {
 		manager.createSession(makeSessionSummary());
 		manager.dispatchServerAction({ type: ActionType.SessionReady, session: sessionUri });
 
-		const envelopes: IActionEnvelope[] = [];
+		const envelopes: ActionEnvelope[] = [];
 		disposables.add(manager.onDidEmitEnvelope(e => envelopes.push(e)));
 
 		manager.dispatchServerAction({
@@ -210,7 +219,7 @@ suite('AgentHostStateManager', () => {
 			userMessage: { text: 'hello' },
 		});
 
-		const envelopes: IActionEnvelope[] = [];
+		const envelopes: ActionEnvelope[] = [];
 		disposables.add(manager.onDidEmitEnvelope(e => envelopes.push(e)));
 
 		manager.dispatchServerAction({
@@ -266,7 +275,7 @@ suite('AgentHostStateManager', () => {
 			{
 				id: 'turn-1',
 				userMessage: { text: 'hello' },
-				responseParts: [{ kind: ResponsePartKind.Markdown, id: 'p1', content: 'world' } satisfies IMarkdownResponsePart],
+				responseParts: [{ kind: ResponsePartKind.Markdown, id: 'p1', content: 'world' } satisfies MarkdownResponsePart],
 				usage: undefined,
 				state: TurnState.Complete,
 			},
@@ -276,7 +285,7 @@ suite('AgentHostStateManager', () => {
 		assert.strictEqual(state.lifecycle, SessionLifecycle.Ready);
 		assert.strictEqual(state.turns.length, 1);
 		assert.strictEqual(state.turns[0].userMessage.text, 'hello');
-		assert.strictEqual((state.turns[0].responseParts[0] as IMarkdownResponsePart).content, 'world');
+		assert.strictEqual((state.turns[0].responseParts[0] as MarkdownResponsePart).content, 'world');
 	});
 
 	test('restoreSession returns existing state for duplicate session', () => {
@@ -294,5 +303,112 @@ suite('AgentHostStateManager', () => {
 		manager.restoreSession(makeSessionSummary(), []);
 
 		assert.strictEqual(notifications.length, 0, 'should not emit notification for restored sessions');
+	});
+
+	test('emits sessionSummaryChanged when summary changes', () => {
+		return runWithFakedTimers({ useFakeTimers: true }, async () => {
+			manager.createSession(makeSessionSummary());
+			manager.dispatchServerAction({ type: ActionType.SessionReady, session: sessionUri });
+
+			const notifications: INotification[] = [];
+			disposables.add(manager.onDidEmitNotification(n => notifications.push(n)));
+
+			manager.dispatchServerAction({ type: ActionType.SessionTitleChanged, session: sessionUri, title: 'New Title' });
+
+			// Should not fire synchronously (debounced)
+			assert.strictEqual(notifications.filter(n => n.type === NotificationType.SessionSummaryChanged).length, 0);
+
+			// Advance past debounce
+			await new Promise(r => setTimeout(r, 150));
+
+			const changed = notifications.filter(n => n.type === NotificationType.SessionSummaryChanged);
+			assert.strictEqual(changed.length, 1);
+			const notification = changed[0] as SessionSummaryChangedNotification;
+			assert.strictEqual(notification.session, sessionUri);
+			assert.strictEqual(notification.changes.title, 'New Title');
+			assert.strictEqual(notification.changes.status, undefined, 'unchanged fields should be omitted');
+		});
+	});
+
+	test('coalesces multiple summary changes into one notification', () => {
+		return runWithFakedTimers({ useFakeTimers: true }, async () => {
+			manager.createSession(makeSessionSummary());
+			manager.dispatchServerAction({ type: ActionType.SessionReady, session: sessionUri });
+
+			const notifications: INotification[] = [];
+			disposables.add(manager.onDidEmitNotification(n => notifications.push(n)));
+
+			manager.dispatchServerAction({ type: ActionType.SessionTitleChanged, session: sessionUri, title: 'First' });
+			manager.dispatchServerAction({ type: ActionType.SessionTitleChanged, session: sessionUri, title: 'Second' });
+
+			await new Promise(r => setTimeout(r, 150));
+
+			const changed = notifications.filter(n => n.type === NotificationType.SessionSummaryChanged);
+			assert.strictEqual(changed.length, 1, 'should coalesce into one notification');
+			assert.strictEqual((changed[0] as SessionSummaryChangedNotification).changes.title, 'Second');
+		});
+	});
+
+	test('does not emit sessionSummaryChanged when summary is unchanged', () => {
+		return runWithFakedTimers({ useFakeTimers: true }, async () => {
+			manager.createSession(makeSessionSummary());
+			manager.dispatchServerAction({ type: ActionType.SessionReady, session: sessionUri });
+
+			const notifications: INotification[] = [];
+			disposables.add(manager.onDidEmitNotification(n => notifications.push(n)));
+
+			// SessionReady changes lifecycle, not summary — so no summary notification
+			await new Promise(r => setTimeout(r, 150));
+
+			const changed = notifications.filter(n => n.type === NotificationType.SessionSummaryChanged);
+			assert.strictEqual(changed.length, 0);
+		});
+	});
+
+	test('does not emit sessionSummaryChanged for deleted session', () => {
+		return runWithFakedTimers({ useFakeTimers: true }, async () => {
+			manager.createSession(makeSessionSummary());
+			manager.dispatchServerAction({ type: ActionType.SessionReady, session: sessionUri });
+
+			const notifications: INotification[] = [];
+			disposables.add(manager.onDidEmitNotification(n => notifications.push(n)));
+
+			manager.dispatchServerAction({ type: ActionType.SessionTitleChanged, session: sessionUri, title: 'New Title' });
+			manager.deleteSession(sessionUri);
+
+			await new Promise(r => setTimeout(r, 150));
+
+			const changed = notifications.filter(n => n.type === NotificationType.SessionSummaryChanged);
+			assert.strictEqual(changed.length, 0, 'should not emit for deleted sessions');
+		});
+	});
+});
+
+suite('Subagent URI helpers', () => {
+
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('buildSubagentSessionUri creates correct URI', () => {
+		assert.strictEqual(
+			buildSubagentSessionUri('copilot:/session-1', 'tc-1'),
+			'copilot:/session-1/subagent/tc-1',
+		);
+	});
+
+	test('parseSubagentSessionUri extracts parent and toolCallId', () => {
+		const parsed = parseSubagentSessionUri('copilot:/session-1/subagent/tc-1');
+		assert.deepStrictEqual(parsed, {
+			parentSession: 'copilot:/session-1',
+			toolCallId: 'tc-1',
+		});
+	});
+
+	test('parseSubagentSessionUri returns undefined for non-subagent URIs', () => {
+		assert.strictEqual(parseSubagentSessionUri('copilot:/session-1'), undefined);
+	});
+
+	test('isSubagentSession identifies subagent URIs', () => {
+		assert.strictEqual(isSubagentSession('copilot:/session-1/subagent/tc-1'), true);
+		assert.strictEqual(isSubagentSession('copilot:/session-1'), false);
 	});
 });

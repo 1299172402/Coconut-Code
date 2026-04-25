@@ -21,6 +21,7 @@ import { ILanguageModelsService } from '../../../../../workbench/contrib/chat/co
 import { IMcpServer, IMcpService } from '../../../../../workbench/contrib/mcp/common/mcpTypes.js';
 import { IAICustomizationWorkspaceService, IStorageSourceFilter } from '../../../../../workbench/contrib/chat/common/aiCustomizationWorkspaceService.js';
 import { IAgentPluginService } from '../../../../../workbench/contrib/chat/common/plugins/agentPluginService.js';
+import { ICustomizationHarnessService } from '../../../../../workbench/contrib/chat/common/customizationHarnessService.js';
 import { ComponentFixtureContext, createEditorServices, defineComponentFixture, defineThemedFixtureGroup, registerWorkbenchServices } from '../../../../../workbench/test/browser/componentFixtures/fixtureUtils.js';
 import { AICustomizationShortcutsWidget } from '../../browser/aiCustomizationShortcutsWidget.js';
 import { CUSTOMIZATION_ITEMS, CustomizationLinkViewItem } from '../../browser/customizationsToolbar.contribution.js';
@@ -115,7 +116,6 @@ interface ICustomizationCounts {
 	readonly agents?: number;
 	readonly skills?: number;
 	readonly instructions?: number;
-	readonly prompts?: number;
 	readonly hooks?: number;
 }
 
@@ -128,15 +128,6 @@ function createMockPromptsServiceWithCounts(counts?: ICustomizationCounts): IPro
 		source: { storage: PromptsStorage.local },
 	}));
 	const skills = Array.from({ length: counts?.skills ?? 0 }, (_, i) => fakeItem('skill', i));
-	const prompts = Array.from({ length: counts?.prompts ?? 0 }, (_, i) => ({
-		uri: fakeUri('prompt', i),
-		name: `prompt-${i}`,
-		type: PromptsType.prompt,
-		storage: PromptsStorage.local,
-		userInvocable: true,
-		parsedPromptFile: undefined,
-		when: undefined,
-	}));
 	const instructions = Array.from({ length: counts?.instructions ?? 0 }, (_, i) => fakeItem('instructions', i));
 	const hooks = Array.from({ length: counts?.hooks ?? 0 }, (_, i) => fakeItem('hook', i));
 
@@ -151,7 +142,6 @@ function createMockPromptsServiceWithCounts(counts?: ICustomizationCounts): IPro
 		override getPromptLocationLabel() { return ''; }
 		override async getCustomAgents() { return agents as never[]; }
 		override async findAgentSkills() { return skills as never[]; }
-		override async getPromptSlashCommands() { return prompts as never[]; }
 		override async listPromptFiles(type: PromptsType) {
 			return (type === PromptsType.hook ? hooks : instructions) as never[];
 		}
@@ -214,6 +204,10 @@ function renderWidget(ctx: ComponentFixtureContext, options?: { mcpServerCount?:
 			}());
 			reg.defineInstance(ISessionsManagementService, new class extends mock<ISessionsManagementService>() {
 				override readonly activeSession = observableValue<IActiveSession | undefined>('activeSession', undefined);
+			}());
+			reg.defineInstance(ICustomizationHarnessService, new class extends mock<ICustomizationHarnessService>() {
+				override readonly availableHarnesses = observableValue<readonly never[]>('availableHarnesses', []);
+				override findHarnessById() { return undefined; }
 			}());
 			reg.defineInstance(IFileService, new class extends mock<IFileService>() {
 				override readonly onDidFilesChange = Event.None;
@@ -278,7 +272,7 @@ export default defineThemedFixtureGroup({ path: 'sessions/' }, {
 		labels: { kind: 'screenshot' },
 		render: (ctx) => renderWidget(ctx, {
 			mcpServerCount: 2,
-			counts: { agents: 2, skills: 30, instructions: 16, prompts: 17, hooks: 4 },
+			counts: { agents: 2, skills: 30, instructions: 16, hooks: 4 },
 		}),
 	}),
 });

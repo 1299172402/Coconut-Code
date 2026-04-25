@@ -57,14 +57,6 @@ export interface AgentPromptProps extends GenericBasePromptElementProps {
 	readonly triggerSummarize?: boolean;
 
 	/**
-	 * When true, appends a summarization instruction as a user message in the
-	 * current agent loop iteration instead of making a separate LLM call.
-	 * The model outputs ONLY a summary (no tool calls) and the loop continues
-	 * with the compacted history on the next iteration.
-	 */
-	readonly inlineSummarization?: boolean;
-
-	/**
 	 * Enables cache breakpoints and summarization
 	 */
 	readonly enableCacheBreakpoints?: boolean;
@@ -79,8 +71,11 @@ export interface AgentPromptProps extends GenericBasePromptElementProps {
 	 */
 	readonly customizations?: AgentPromptCustomizations;
 
-	/** Whether this summarization was triggered as a background or foreground operation. */
-	readonly summarizationSource?: 'background' | 'foreground';
+	/**
+	 * Prefer Simple mode for summarization, typically for the budget-exceeded recovery path.
+	 * An explicit summarization mode configuration can still force Full mode.
+	 */
+	readonly forceSimpleSummary?: boolean;
 }
 
 /** Proportion of the prompt token budget any singular textual tool result is allowed to use. */
@@ -151,7 +146,7 @@ export class AgentPrompt extends PromptElement<AgentPromptProps> {
 				<SummarizedConversationHistory
 					flexGrow={1}
 					triggerSummarize={this.props.triggerSummarize}
-					inlineSummarization={this.props.inlineSummarization}
+					forceSimpleSummary={this.props.forceSimpleSummary}
 					priority={900}
 					promptContext={this.props.promptContext}
 					location={this.props.location}
@@ -159,7 +154,6 @@ export class AgentPrompt extends PromptElement<AgentPromptProps> {
 					endpoint={this.props.endpoint}
 					tools={this.props.promptContext.tools?.availableTools}
 					enableCacheBreakpoints={this.props.enableCacheBreakpoints}
-					summarizationSource={this.props.summarizationSource}
 					userQueryTagName={userQueryTagName}
 					ReminderInstructionsClass={ReminderInstructionsClass}
 					ToolReferencesHintClass={ToolReferencesHintClass}
@@ -531,6 +525,8 @@ class SkillAdherenceReminder extends PromptElement<SkillAdherenceReminderProps> 
 	constructor(
 		props: SkillAdherenceReminderProps,
 		@ICustomInstructionsService private readonly customInstructionsService: ICustomInstructionsService,
+		@IConfigurationService private readonly configurationService: IConfigurationService,
+		@IExperimentationService private readonly experimentationService: IExperimentationService,
 	) {
 		super(props);
 	}
@@ -545,6 +541,14 @@ class SkillAdherenceReminder extends PromptElement<SkillAdherenceReminderProps> 
 		const indexFile = this.customInstructionsService.parseInstructionIndexFile(indexVariable.value);
 		if (indexFile.skills.size === 0) {
 			return undefined;
+		}
+
+		const skillToolEnabled = this.configurationService.getExperimentBasedConfig(ConfigKey.Advanced.SkillToolEnabled, this.experimentationService);
+
+		if (skillToolEnabled) {
+			return <Tag name='additional_skills_reminder'>
+				Always check if any skills apply to the user's request. If so, use the {ToolName.Skill} tool to invoke the skill by name. Multiple skill files may be needed for a single request. These files contain best practices built from testing that are needed for high-quality outputs.<br />
+			</Tag>;
 		}
 
 		return <Tag name='additional_skills_reminder'>
