@@ -16,8 +16,9 @@ import { URI } from '../../../../util/vs/base/common/uri';
 import { SyncDescriptor } from '../../../../util/vs/platform/instantiation/common/descriptors';
 import { IInstantiationService } from '../../../../util/vs/platform/instantiation/common/instantiation';
 import { MarkdownString } from '../../../../vscodeTypes';
+import type { MemoryPromptResponse, StoreMemoryRequest } from '@github/copilot-agentic-tools/memory';
+import { IAgentMemoryService } from '../../common/agentMemoryService';
 import { createExtensionUnitTestingServices } from '../../../test/node/services';
-import { IAgentMemoryService, RepoMemoryEntry } from '../../common/agentMemoryService';
 import { MemoryTool } from '../memoryTool';
 
 /**
@@ -44,23 +45,34 @@ class MockCapturingTelemetryService extends NullTelemetryService {
  */
 class MockAgentMemoryService implements IAgentMemoryService {
 	declare readonly _serviceBrand: undefined;
-	storedMemories: RepoMemoryEntry[] = [];
+	storedMemories: StoreMemoryRequest[] = [];
+	storedUserMemories: StoreMemoryRequest[] = [];
 
-	async checkMemoryEnabled(): Promise<boolean> {
+	async storeRepoMemory(memory: StoreMemoryRequest): Promise<boolean> {
+		this.storedMemories.push({ ...memory, citations: memory.citations ?? [] });
 		return true;
 	}
 
-	async getRepoMemories(_limit?: number): Promise<RepoMemoryEntry[] | undefined> {
-		return this.storedMemories;
+	async storeUserMemory(memory: StoreMemoryRequest): Promise<boolean> {
+		this.storedUserMemories.push(memory);
+		return true;
 	}
 
-	async storeRepoMemory(memory: RepoMemoryEntry): Promise<boolean> {
-		this.storedMemories.push(memory);
-		return true;
+	async getMemoryPrompt(_repoNwo?: string, _sessionId?: string): Promise<MemoryPromptResponse | undefined> {
+		return undefined;
+	}
+
+	getCachedMemoryPrompt(_sessionId?: string): MemoryPromptResponse | undefined {
+		return undefined;
+	}
+
+	clearCache(_sessionId?: string): void {
+		// Mock implementation - no-op
 	}
 
 	clearMemories(): void {
 		this.storedMemories = [];
+		this.storedUserMemories = [];
 	}
 }
 
@@ -70,16 +82,24 @@ class MockAgentMemoryService implements IAgentMemoryService {
 class DisabledMockAgentMemoryService implements IAgentMemoryService {
 	declare readonly _serviceBrand: undefined;
 
-	async checkMemoryEnabled(): Promise<boolean> {
+	async storeRepoMemory(_memory: StoreMemoryRequest): Promise<boolean> {
 		return false;
 	}
 
-	async getRepoMemories(_limit?: number): Promise<RepoMemoryEntry[] | undefined> {
+	async storeUserMemory(_memory: StoreMemoryRequest): Promise<boolean> {
+		return false;
+	}
+
+	async getMemoryPrompt(_repoNwo?: string, _sessionId?: string): Promise<MemoryPromptResponse | undefined> {
 		return undefined;
 	}
 
-	async storeRepoMemory(_memory: RepoMemoryEntry): Promise<boolean> {
-		return false;
+	getCachedMemoryPrompt(_sessionId?: string): MemoryPromptResponse | undefined {
+		return undefined;
+	}
+
+	clearCache(_sessionId?: string): void {
+		// Mock implementation - no-op
 	}
 }
 
@@ -470,7 +490,7 @@ suite('MemoryTool', () => {
 				}),
 			});
 			const text = getResultText(result as never);
-			expect(text).toContain('File created successfully');
+			expect(text).toContain('Repository memory stored successfully.');
 		});
 	});
 

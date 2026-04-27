@@ -23,6 +23,7 @@ import './listDirTool';
 import './skillTool';
 import './manageTodoListTool';
 import './memoryTool';
+import './storeMemoryTool';
 import './multiReplaceStringTool';
 import './newNotebookTool';
 import './newWorkspace/newWorkspaceTool';

@@ -5,6 +5,7 @@
 
 import type * as vscode from 'vscode';
 import { ChatLocation } from '../../../platform/chat/common/commonTypes';
+import { ISessionTranscriptService } from '../../../platform/chat/common/sessionTranscriptService';
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { IEndpointProvider } from '../../../platform/endpoint/common/endpointProvider';
 import { IAutomodeService } from '../../../platform/endpoint/node/automodeService';
@@ -16,7 +17,6 @@ import { IAlternativeNotebookContentService } from '../../../platform/notebook/c
 import { getCellId } from '../../../platform/notebook/common/helpers';
 import { INotebookService } from '../../../platform/notebook/common/notebookService';
 import { IOTelService } from '../../../platform/otel/common/otelService';
-import { ISessionTranscriptService } from '../../../platform/chat/common/sessionTranscriptService';
 import { IPromptPathRepresentationService } from '../../../platform/prompts/common/promptPathRepresentationService';
 import { ITabsAndEditorsService } from '../../../platform/tabs/common/tabsAndEditorsService';
 import { IExperimentationService } from '../../../platform/telemetry/common/nullExperimentationService';
@@ -35,6 +35,7 @@ import { ICodeMapperService } from '../../prompts/node/codeMapper/codeMapperServ
 import { NotebookInlinePrompt } from '../../prompts/node/panel/notebookInlinePrompt';
 import { getToolName, ToolName } from '../../tools/common/toolNames';
 import { IToolsService } from '../../tools/common/toolsService';
+import { IAgentMemoryToolRegistrar } from '../../tools/node/agentMemoryToolRegistrar';
 import { getAgentMaxRequests } from '../common/agentConfig';
 import { EditCodeIntent, EditCodeIntentOptions } from './editCodeIntent';
 import { EditCode2IntentInvocation } from './editCodeIntent2';
@@ -108,9 +109,10 @@ export class NotebookEditorIntentInvocation extends EditCode2IntentInvocation {
 		@IExperimentationService expService: IExperimentationService,
 		@IAutomodeService automodeService: IAutomodeService,
 		@IOTelService otelService: IOTelService,
+		@IAgentMemoryToolRegistrar agentMemoryToolRegistrar: IAgentMemoryToolRegistrar,
 		@ISessionTranscriptService sessionTranscriptService: ISessionTranscriptService,
 	) {
-		super(intent, location, endpoint, request, intentOptions, instantiationService, codeMapperService, envService, promptPathRepresentationService, endpointProvider, workspaceService, toolsService, configurationService, editLogService, commandService, telemetryService, notebookService, logService, expService, automodeService, otelService, sessionTranscriptService);
+		super(intent, location, endpoint, request, intentOptions, instantiationService, codeMapperService, envService, promptPathRepresentationService, endpointProvider, workspaceService, toolsService, configurationService, editLogService, commandService, telemetryService, notebookService, logService, expService, automodeService, otelService, agentMemoryToolRegistrar, sessionTranscriptService);
 	}
 
 	protected override prompt = NotebookInlinePrompt;

@@ -9,8 +9,8 @@ import { BudgetExceededError } from '@vscode/prompt-tsx/dist/base/materialized';
 import type * as vscode from 'vscode';
 import { IChatSessionService } from '../../../platform/chat/common/chatSessionService';
 import { ChatFetchResponseType, ChatLocation, ChatResponse } from '../../../platform/chat/common/commonTypes';
-import { ISessionTranscriptService } from '../../../platform/chat/common/sessionTranscriptService';
 import { getTextPart } from '../../../platform/chat/common/globalStringUtils';
+import { ISessionTranscriptService } from '../../../platform/chat/common/sessionTranscriptService';
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { isAnthropicFamily, isGptFamily, modelCanUseApplyPatchExclusively, modelCanUseReplaceStringExclusively, modelSupportsApplyPatch, modelSupportsMultiReplaceString, modelSupportsReplaceString, modelSupportsSimplifiedApplyPatchInstructions } from '../../../platform/endpoint/common/chatModelCapabilities';
 import { IEndpointProvider } from '../../../platform/endpoint/common/endpointProvider';
@@ -49,17 +49,20 @@ import { IBuildPromptResult, IIntent, IIntentInvocation } from '../../prompt/nod
 import { AgentPrompt, AgentPromptProps } from '../../prompts/node/agent/agentPrompt';
 import { BackgroundSummarizationState, BackgroundSummarizer, IBackgroundSummarizationResult, shouldKickOffBackgroundSummarization } from '../../prompts/node/agent/backgroundSummarizer';
 import { AgentPromptCustomizations, PromptRegistry } from '../../prompts/node/agent/promptRegistry';
-import { extractInlineSummary, InlineSummarizationUserMessage, SummarizedConversationHistory, SummarizedConversationHistoryMetadata, SummarizedConversationHistoryPropsBuilder, appendTranscriptHintToSummary, computeSummarizationRoundCounts } from '../../prompts/node/agent/summarizedConversationHistory';
+import { appendTranscriptHintToSummary, computeSummarizationRoundCounts, extractInlineSummary, InlineSummarizationUserMessage, SummarizedConversationHistory, SummarizedConversationHistoryMetadata, SummarizedConversationHistoryPropsBuilder } from '../../prompts/node/agent/summarizedConversationHistory';
 import { PromptRenderer, renderPromptElement } from '../../prompts/node/base/promptRenderer';
 import { ICodeMapperService } from '../../prompts/node/codeMapper/codeMapperService';
 import { EditCodePrompt2 } from '../../prompts/node/panel/editCodePrompt2';
 import { NotebookInlinePrompt } from '../../prompts/node/panel/notebookInlinePrompt';
 import { ToolResultMetadata } from '../../prompts/node/panel/toolCalling';
 import { IEditToolLearningService } from '../../tools/common/editToolLearningService';
-import { normalizeToolSchema } from '../../tools/common/toolSchemaNormalizer';
 import { ContributedToolName, ToolName } from '../../tools/common/toolNames';
+import { normalizeToolSchema } from '../../tools/common/toolSchemaNormalizer';
 import { IToolsService } from '../../tools/common/toolsService';
+import { IAgentMemoryService } from '../../tools/common/agentMemoryService';
+import { IAgentMemoryToolRegistrar } from '../../tools/node/agentMemoryToolRegistrar';
 import { applyPatch5Description } from '../../tools/node/applyPatchTool';
+import { extractSessionId } from '../../tools/node/memoryTool';
 import { multiReplaceStringPrimaryDescription } from '../../tools/node/multiReplaceStringTool';
 import { replaceStringBatchDescription } from '../../tools/node/replaceStringTool';
 import { getAgentMaxRequests } from '../common/agentConfig';
@@ -81,6 +84,7 @@ export const getAgentTools = async (accessor: ServicesAccessor, request: vscode.
 	const experimentationService = accessor.get<IExperimentationService>(IExperimentationService);
 	const endpointProvider = accessor.get<IEndpointProvider>(IEndpointProvider);
 	const editToolLearningService = accessor.get<IEditToolLearningService>(IEditToolLearningService);
+	const agentMemoryService = accessor.get<IAgentMemoryService>(IAgentMemoryService);
 	model ??= await endpointProvider.getChatEndpoint(request);
 
 	const allowTools: Record<string, boolean> = {};
@@ -146,6 +150,14 @@ export const getAgentTools = async (accessor: ServicesAccessor, request: vscode.
 	if (model.family.toLowerCase().includes('gemini-3') && configurationService.getExperimentBasedConfig(ConfigKey.Advanced.Gemini3MultiReplaceString, experimentationService)) {
 		allowTools[ToolName.MultiReplaceString] = true;
 	}
+
+	const sessionResource = (request.toolInvocationToken as any)?.sessionResource as string | undefined;
+	const sessionId = sessionResource ? extractSessionId(sessionResource) : undefined;
+	let cachedMemoryPrompt = agentMemoryService.getCachedMemoryPrompt(sessionId);
+	if (!cachedMemoryPrompt && configurationService.getExperimentBasedConfig(ConfigKey.CopilotMemoryEnabled, experimentationService)) {
+		cachedMemoryPrompt = await agentMemoryService.getMemoryPrompt(undefined, sessionId);
+	}
+	allowTools[ToolName.StoreMemory] = !!cachedMemoryPrompt;
 
 	const tools = toolsService.getEnabledTools(request, model, tool => {
 		if (typeof allowTools[tool.name] === 'boolean') {
@@ -393,6 +405,7 @@ export class AgentIntentInvocation extends EditCodeIntentInvocation implements I
 		@IExperimentationService private readonly expService: IExperimentationService,
 		@IAutomodeService private readonly automodeService: IAutomodeService,
 		@IOTelService override readonly otelService: IOTelService,
+		@IAgentMemoryToolRegistrar private readonly agentMemoryToolRegistrar: IAgentMemoryToolRegistrar,
 		@ISessionTranscriptService private readonly sessionTranscriptService: ISessionTranscriptService,
 	) {
 		super(intent, location, endpoint, request, intentOptions, instantiationService, codeMapperService, envService, promptPathRepresentationService, endpointProvider, workspaceService, toolsService, configurationService, editLogService, commandService, telemetryService, notebookService, otelService);
@@ -408,6 +421,11 @@ export class AgentIntentInvocation extends EditCodeIntentInvocation implements I
 		token: vscode.CancellationToken
 	): Promise<IBuildPromptResult> {
 		this._resolvedCustomizations = await PromptRegistry.resolveAllCustomizations(this.instantiationService, this.endpoint);
+
+		if (promptContext.history?.length === 0) {
+			const sessionResource = (promptContext.tools?.toolInvocationToken as any)?.sessionResource as string | undefined;
+			await this.agentMemoryToolRegistrar.registerMemoryTools(sessionResource ? extractSessionId(sessionResource) : undefined);
+		}
 		// Add any references from the codebase invocation to the request
 		const codebase = await this._getCodebaseReferences(promptContext, token);
 

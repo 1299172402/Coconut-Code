@@ -1198,6 +1198,18 @@
 				}
 			},
 			{
+				"name": "copilot_store_memory",
+				"displayName": "Store Memory",
+				"toolReferenceName": "store_memory",
+				"userDescription": "Store a persistent memory fact via Copilot",
+				"when": "config.github.copilot.chat.copilotMemory.enabled",
+				"modelDescription": "Store a persistent memory fact via Copilot Memory.",
+				"inputSchema": {
+					"type": "object",
+					"properties": {}
+				}
+			},
+			{
 				"name": "copilot_resolveMemoryFileUri",
 				"displayName": "Resolve Memory File URI",
 				"toolReferenceName": "resolveMemoryFileUri",
@@ -6604,6 +6616,7 @@
 		"@anthropic-ai/sdk": "^0.82.0",
 		"@github/blackbird-external-ingest-utils": "^0.3.0",
 		"@github/copilot": "^1.0.34",
+		"@github/copilot-agentic-tools": "^0.6.0",
 		"@google/genai": "^1.22.0",
 		"@humanwhocodes/gitignore-to-minimatch": "1.0.2",
 		"@microsoft/tiktokenizer": "^1.0.10",
