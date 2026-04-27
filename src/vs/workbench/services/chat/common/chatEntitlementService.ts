@@ -66,6 +66,10 @@ export namespace ChatEntitlementContextKeys {
 	export const completionsQuotaExceeded = new RawContextKey<boolean>('completionsQuotaExceeded', false, true);
 
 	export const chatAnonymous = new RawContextKey<boolean>('chatAnonymous', false, true);
+
+	// BYOK context keys: defaults to true so BYOK UI is available before the Copilot extension
+	// refines based on the user's token (e.g., enterprise policy may set to false).
+	export const clientByokEnabled = new RawContextKey<boolean>('github.copilot.clientByokEnabled', true, true);
 }
 
 export const IChatEntitlementService = createDecorator<IChatEntitlementService>('chatEntitlementService');
@@ -161,6 +165,7 @@ export interface IChatEntitlementService {
 
 	readonly previewFeaturesDisabled: boolean;
 	readonly clientByokEnabled: boolean;
+	readonly hasByokModels: boolean;
 
 	readonly organisations: string[] | undefined;
 	readonly isInternal: boolean;
@@ -313,6 +318,8 @@ export class ChatEntitlementService extends Disposable implements IChatEntitleme
 		this.chatQuotaExceededContextKey = ChatEntitlementContextKeys.chatQuotaExceeded.bindTo(this.contextKeyService);
 		this.completionsQuotaExceededContextKey = ChatEntitlementContextKeys.completionsQuotaExceeded.bindTo(this.contextKeyService);
 
+		ChatEntitlementContextKeys.clientByokEnabled.bindTo(this.contextKeyService);
+
 		this.anonymousContextKey = ChatEntitlementContextKeys.chatAnonymous.bindTo(this.contextKeyService);
 		this.anonymousContextKey.set(this.anonymous);
 
@@ -417,6 +424,10 @@ export class ChatEntitlementService extends Disposable implements IChatEntitleme
 
 	get clientByokEnabled(): boolean {
 		return this.contextKeyService.getContextKeyValue<boolean>('github.copilot.clientByokEnabled') === true;
+	}
+
+	get hasByokModels(): boolean {
+		return this.contextKeyService.getContextKeyValue<boolean>('github.copilot.hasByokModels') === true;
 	}
 
 	//#endregion

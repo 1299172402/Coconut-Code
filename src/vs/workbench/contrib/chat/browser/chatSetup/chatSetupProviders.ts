@@ -256,20 +256,34 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 	}
 
 	private async doInvoke(request: IChatAgentRequest, progress: (part: IChatProgress) => void, chatService: IChatService, languageModelsService: ILanguageModelsService, chatWidgetService: IChatWidgetService, chatAgentService: IChatAgentService, languageModelToolsService: ILanguageModelToolsService, defaultAccountService: IDefaultAccountService): Promise<IChatAgentResult> {
+		// Check both the context key and the workbench model cache for BYOK models.
+		// The context key may not be set yet due to timing (extension sets it asynchronously).
+		const hasByokModels = this.chatEntitlementService.hasByokModels || this.hasNonCopilotModels(languageModelsService);
 		if (
-			!this.context.state.completed ||									// Setup not completed
+			(!this.context.state.completed && !hasByokModels) ||				// Setup not completed (unless BYOK models are configured)
 			this.context.state.disabled ||										// Extension disabled: run setup to enable
 			this.context.state.untrusted ||										// Workspace untrusted: run setup to ask for trust
 			this.context.state.entitlement === ChatEntitlement.Available ||		// Entitlement available: run setup to sign up
 			(
 				this.context.state.entitlement === ChatEntitlement.Unknown &&	// Entitlement unknown: run setup to sign in / sign up
-				!this.chatEntitlementService.anonymous							// unless anonymous access is enabled
+				!this.chatEntitlementService.anonymous &&						// unless anonymous access is enabled
+				!hasByokModels													// unless BYOK models are configured
 			)
 		) {
 			return this.doInvokeWithSetup(request, progress, chatService, languageModelsService, chatWidgetService, chatAgentService, languageModelToolsService, defaultAccountService);
 		}
 
 		return this.doInvokeWithoutSetup(request, progress, chatService, languageModelsService, chatWidgetService, chatAgentService, languageModelToolsService);
+	}
+
+	private hasNonCopilotModels(languageModelsService: ILanguageModelsService): boolean {
+		for (const id of languageModelsService.getLanguageModelIds()) {
+			const model = languageModelsService.lookupLanguageModel(id);
+			if (model && model.vendor !== 'copilot') {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private async doInvokeWithoutSetup(request: IChatAgentRequest, progress: (part: IChatProgress) => void, chatService: IChatService, languageModelsService: ILanguageModelsService, chatWidgetService: IChatWidgetService, chatAgentService: IChatAgentService, languageModelToolsService: ILanguageModelToolsService): Promise<IChatAgentResult> {
