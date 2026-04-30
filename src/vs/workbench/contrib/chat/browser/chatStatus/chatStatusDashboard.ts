@@ -129,12 +129,22 @@ export class ChatStatusDashboard extends DomWidget {
 			completions?.unlimited === false ||
 			isAnonymousWithSentiment;
 		const contributedEntries = [...this.chatStatusItemService.getEntries()];
-		const hasQuickSettingsContent =
+		// Quick Settings (inline suggestion toggles, snooze, etc.) are only meaningful
+		// once the user has completed setup, is signed in, and has not disabled Chat.
+		// In setup states (new user / signed out / disabled) the controls would be
+		// non-functional, so suppress the section entirely and only show the setup CTA.
+		const isSetupState =
+			isNewUser(this.chatEntitlementService) ||
+			this.chatEntitlementService.entitlement === ChatEntitlement.Unknown ||
+			this.chatEntitlementService.sentiment.disabled ||
+			this.chatEntitlementService.sentiment.untrusted;
+		const hasQuickSettingsContent = !isSetupState && (
 			!this.options?.disableInlineSuggestionsSettings ||
 			!this.options?.disableModelSelection ||
 			!this.options?.disableProviderOptions ||
 			!this.options?.disableCompletionsSnooze ||
-			contributedEntries.length > 0;
+			contributedEntries.length > 0
+		);
 
 		// Title header with plan name, CTA buttons, and manage action
 		let headerAdditionalSpendButton: Button | undefined;
@@ -345,9 +355,12 @@ export class ChatStatusDashboard extends DomWidget {
 			return;
 		}
 
-		this.element.appendChild($('hr'));
+		// Only insert a separator when there is content above (e.g. usage or quick settings)
+		if (this.element.firstChild) {
+			this.element.appendChild($('hr'));
+		}
 
-		let descriptionText: string | MarkdownString;
+		let descriptionText: string | MarkdownString | undefined;
 		let descriptionClass = '.description';
 		if (newUser && anonymousUser) {
 			descriptionText = new MarkdownString(localize({ key: 'activeDescriptionAnonymous', comment: ['{Locked="]({2})"}', '{Locked="]({3})"}'] }, "By continuing with {0} Copilot, you agree to {1}'s [Terms]({2}) and [Privacy Statement]({3})", defaultChat.provider.default.name, defaultChat.provider.default.name, defaultChat.termsStatementUrl, defaultChat.privacyStatementUrl), { isTrusted: true });
@@ -358,8 +371,6 @@ export class ChatStatusDashboard extends DomWidget {
 			descriptionText = localize('enableMoreDescription', "Sign in to enable more Copilot AI features.");
 		} else if (disabled) {
 			descriptionText = localize('enableDescription', "Enable Copilot to use AI features.");
-		} else {
-			descriptionText = localize('signInDescription', "Sign in to use Copilot AI features.");
 		}
 
 		let buttonLabel: string;
@@ -382,7 +393,7 @@ export class ChatStatusDashboard extends DomWidget {
 
 		if (typeof descriptionText === 'string') {
 			this.element.appendChild($(`div${descriptionClass}`, undefined, descriptionText));
-		} else {
+		} else if (descriptionText) {
 			this.element.appendChild($(`div${descriptionClass}`, undefined, this._store.add(this.markdownRendererService.render(descriptionText)).element));
 		}
 
