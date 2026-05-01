@@ -12,6 +12,7 @@ import { CapturingToken } from '../../../platform/requestLogger/common/capturing
 import { IRequestLogger } from '../../../platform/requestLogger/common/requestLogger';
 import { URI } from '../../../util/vs/base/common/uri';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
+import { RequestKind } from '../../../platform/networking/common/networking';
 import { ConversationHistorySummarizationPrompt } from '../../prompts/node/agent/summarizedConversationHistory';
 import { renderPromptElement } from '../../prompts/node/base/promptRenderer';
 import { ChatVariablesCollection } from '../common/chatVariablesCollection';
@@ -90,16 +91,14 @@ export class ChatSummarizerProvider implements vscode.ChatSummarizer {
 			'summarize',
 		);
 
-		const response = await this.requestLogger.captureInvocation(capturingToken, () => endpoint.makeChatRequest(
-			'summarize',
-			allMessages,
-			undefined,
-			token,
-			ChatLocation.Panel,
-			undefined,
-			undefined,
-			false
-		));
+		const response = await this.requestLogger.captureInvocation(capturingToken, () => endpoint.makeChatRequest2({
+			debugName: 'summarize',
+			messages: allMessages,
+			finishedCb: undefined,
+			location: ChatLocation.Agent,
+			userInitiatedRequest: false,
+			requestKindOptions: { kind: RequestKind.MainAgent },
+		}, token));
 
 		if (token.isCancellationRequested) {
 			return '';

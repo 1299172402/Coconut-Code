@@ -13,6 +13,7 @@ import { ConfigKey, IConfigurationService } from '../../../platform/configuratio
 import { ChatEndpointFamily, IEndpointProvider } from '../../../platform/endpoint/common/endpointProvider';
 import { ProxyAgenticEndpoint } from '../../../platform/endpoint/node/proxyAgenticEndpoint';
 import { IFileSystemService } from '../../../platform/filesystem/common/fileSystemService';
+import { RequestKind } from '../../../platform/networking/common/networking';
 import { IGitService } from '../../../platform/git/common/gitService';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IOTelService } from '../../../platform/otel/common/otelService';
@@ -327,6 +328,7 @@ export class ExecutionSubagentToolCallingLoop extends ToolCallingLoop<IExecution
 			},
 			// This loop is inside a tool called from another request, so never user initiated
 			userInitiatedRequest: false,
+			requestKindOptions: { kind: RequestKind.Subagent },
 			telemetryProperties: {
 				requestId: this.options.subAgentInvocationId,
 				messageId: randomUUID(),

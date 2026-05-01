@@ -214,7 +214,7 @@ export interface IMakeChatRequestOptions {
 	 * Options for the kind of request being made (e.g. subagent). Controls the X-Interaction-Type header.
 	 * See notes on each interface.
 	 */
-	requestKindOptions?: IBackgroundRequestOptions | ISubagentRequestOptions;
+	requestKindOptions?: IRequestKindOptions;
 }
 
 export type IChatRequestTelemetryProperties = {
@@ -374,21 +374,45 @@ export interface INetworkRequestOptions {
 	readonly useFetcher?: FetcherId;
 	readonly canRetryOnce?: boolean;
 	readonly location?: ChatLocation;
-	readonly requestKindOptions?: IBackgroundRequestOptions | ISubagentRequestOptions;
+	readonly requestKindOptions?: IRequestKindOptions;
 }
 
 /**
- * A background request is one that is not associated with a user request.
+ * Classifies a chat request for telemetry (`requestKind` on response events) and the
+ * `X-Interaction-Type` header sent to CAPI. Mirrors the server's documented vocabulary.
+ *
+ * Header/telemetry value alignment:
+ * - `Subagent`   → `conversation-subagent`
+ * - `Background` → `conversation-background` (default for unmarked utility/helper calls)
+ * - `MainAgent`  → resolved from `ChatLocation`: `conversation-panel` / `conversation-inline`
+ *                  / `conversation-edits` / `conversation-agent` / `conversation-other` /
+ *                  `conversation-notebook` / `conversation-terminal`. Use this to opt a
+ *                  primary user-initiated turn out of the background default so the
+ *                  location-derived value is sent on the wire.
  */
-export interface IBackgroundRequestOptions {
-	readonly kind: 'background';
+export const RequestKind = {
+	MainAgent: 'mainagent',
+	Subagent: 'subagent',
+	Background: 'background',
+} as const;
+export type RequestKind = typeof RequestKind[keyof typeof RequestKind];
+
+export interface IRequestKindOptions {
+	readonly kind: RequestKind;
 }
 
 /**
- * A subagent request is a request made by a subagent, indicated with a subAgentInvocationId included in the request from VS Code.
+ * Resolves the `X-Interaction-Type` value (and matching `requestKind` telemetry value)
+ * from a `RequestKind` plus the location-derived intent. `MainAgent` falls through to
+ * `intent` so panel/inline/edits/agent/other surfaces are reported as the server expects.
  */
-export interface ISubagentRequestOptions {
-	readonly kind: 'subagent';
+export function resolveInteractionType(kind: RequestKind | undefined, intent: string): string {
+	switch (kind) {
+		case RequestKind.Subagent: return 'conversation-subagent';
+		case RequestKind.Background: return 'conversation-background';
+		case RequestKind.MainAgent: return intent;
+		default: return intent;
+	}
 }
 
 function networkRequest(
@@ -412,12 +436,7 @@ function networkRequest(
 		name: '',
 		version: '',
 	} satisfies IEndpoint : endpointOrUrl;
-	const agentInteractionType = options.requestKindOptions?.kind === 'subagent' ?
-		'conversation-subagent' :
-		options.requestKindOptions?.kind === 'background' ?
-			'conversation-background' :
-			intent === 'conversation-agent' ? intent :
-				intent;
+	const agentInteractionType = resolveInteractionType(options.requestKindOptions?.kind, intent);
 
 	const headers: ReqHeaders = {
 		Authorization: `Bearer ${secretKey}`,
