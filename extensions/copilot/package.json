@@ -1976,6 +1976,13 @@
 										"additionalProperties": {
 											"type": "string"
 										}
+									},
+									"supportsReasoningEffort": {
+										"type": "array",
+										"description": "Supported reasoning effort levels for this model. When provided, the model picker can expose a Thinking Effort option.",
+										"items": {
+											"type": "string"
+										}
 									}
 								},
 								"required": [
