@@ -90,6 +90,34 @@ const TOOL_REFERENCE_NAME = 'runInTerminal';
 const LEGACY_TOOL_REFERENCE_FULL_NAMES = ['runCommands/runInTerminal'];
 const INPUT_NEEDED_NOTIFICATION_THROTTLE_MS = 5000;
 
+interface ITimeoutRule {
+	readonly regex: RegExp;
+	readonly minMs: number;
+}
+
+const TIMEOUT_RULES: readonly ITimeoutRule[] = [
+	// Package installs (often network-bound and slow)
+	{ regex: /\b(npm|pnpm|yarn|bun)\s+(install|add|ci)\b/i, minMs: 10 * 60_000 },
+	{ regex: /\b(pip|pip3|pipx|poetry|uv)\s+(install|add|sync)\b/i, minMs: 10 * 60_000 },
+	{ regex: /\b(brew|apt(?:-get)?|dnf|yum|pacman)\s+install\b/i, minMs: 15 * 60_000 },
+	// Builds / compiles
+	{ regex: /\b(npm|pnpm|yarn|bun)\s+(?:run\s+)?build\b/i, minMs: 5 * 60_000 },
+	// `make` without a target or with a build-like target (excludes clean/check/help/info/version/uninstall/distclean/mrproper)
+	{ regex: /\bmake(?:\s+(?!(?:clean|distclean|mrproper|check|help|info|version|uninstall)\b)\S+|\s*$)/i, minMs: 10 * 60_000 },
+	// `cmake --build` only (not cmake configuration steps like `cmake ..`)
+	{ regex: /\bcmake\s+--build\b/i, minMs: 10 * 60_000 },
+	{ regex: /\b(?:cargo\s+build|go\s+build|dotnet\s+build)\b/i, minMs: 10 * 60_000 },
+	// Docker / containers
+	{ regex: /\bdocker\s+(?:build|pull|compose\s+up)\b/i, minMs: 20 * 60_000 },
+	{ regex: /\bdevcontainer\s+up\b/i, minMs: 20 * 60_000 },
+	// VM / emulator
+	{ regex: /\b(?:qemu-system|qemu-img|virt-install)\b/i, minMs: 20 * 60_000 },
+	// Repo setup
+	{ regex: /\bgit\s+(?:clone|submodule\s+update)\b/i, minMs: 10 * 60_000 },
+	// Tests
+	{ regex: /\b(npm|pnpm|yarn|bun)\s+(?:test|run\s+test)\b/i, minMs: 5 * 60_000 },
+];
+
 function createPowerShellModelDescription(shell: string, isSandboxEnabled: boolean, networkDomains?: ITerminalSandboxResolvedNetworkDomains): string {
 	const isWinPwsh = isWindowsPowerShell(shell);
 	const parts = [
@@ -349,7 +377,7 @@ export async function createRunInTerminalToolData(
 				},
 				timeout: {
 					type: 'number',
-					description: 'Optional hard cap in milliseconds on how long the tool tracks the command before returning. Omit to let the command run to completion (recommended for package installs, builds, and long-running scripts). Use 0 to explicitly indicate no timeout.',
+					description: 'Optional hard cap in milliseconds on how long the tool tracks the command before returning. For one-shot long-running commands (builds, compiles, installs, downloads, test suites, VM boots), set a generous timeout (around 600000+), never short (<60000). Omit timeout only for processes that should run indefinitely (servers, daemons). Use 0 to explicitly indicate no timeout. Note: timeouts that are below a known minimum for the matched command type will be automatically raised to that minimum.',
 				},
 			},
 			required: ['command', 'explanation', 'goal', 'mode']
@@ -523,6 +551,17 @@ export class RunInTerminalTool extends Disposable implements IToolImpl {
 				return { mode: 'sync', persistentSession: false, waitStrategy: 'completion' };
 		}
 	}
+
+	private _getMinimumTimeoutMsForCommand(command: string): number | undefined {
+		for (const rule of TIMEOUT_RULES) {
+			if (rule.regex.test(command)) {
+				return rule.minMs;
+			}
+		}
+
+		return undefined;
+	}
+
 	/**
 	 * Controls whether this tool wires up sandbox-specific command-line
 	 * behavior, including both the {@link CommandLineSandboxRewriter} and the
@@ -1157,6 +1196,7 @@ export class RunInTerminalTool extends Disposable implements IToolImpl {
 		const args = invocation.parameters as IRunInTerminalInputParams;
 		const executionOptions = this._resolveExecutionOptions(args);
 		this._logService.debug(`RunInTerminalTool: Invoking with options ${JSON.stringify(args)}`);
+		const command = toolSpecificData.commandLine.userEdited ?? toolSpecificData.commandLine.toolEdited ?? toolSpecificData.commandLine.original;
 		let toolResultMessage: string | IMarkdownString | undefined;
 		if (args.timeout !== undefined && (Number.isNaN(args.timeout) || args.timeout < 0)) {
 			return {
@@ -1174,12 +1214,18 @@ export class RunInTerminalTool extends Disposable implements IToolImpl {
 			// background unnecessarily.
 			args.timeout = 0;
 		}
+		if (executionOptions.mode === 'sync' && args.timeout !== undefined && args.timeout > 0) {
+			const minimumTimeoutMs = this._getMinimumTimeoutMsForCommand(command);
+			if (minimumTimeoutMs !== undefined && args.timeout < minimumTimeoutMs) {
+				this._logService.warn(`RunInTerminalTool: Raising timeout from ${args.timeout}ms to ${minimumTimeoutMs}ms for long-running command pattern`);
+				args.timeout = minimumTimeoutMs;
+			}
+		}
 
 		const chatSessionResource = invocation.context.sessionResource;
 		// Subagent-initiated terminals cannot receive steering messages; the subagent
 		// runs in its own tool-calling loop and should poll with get_terminal_output.
 		const shouldSendNotifications = !invocation.subAgentInvocationId;
-		const command = toolSpecificData.commandLine.userEdited ?? toolSpecificData.commandLine.toolEdited ?? toolSpecificData.commandLine.original;
 		const didUserEditCommand = (
 			toolSpecificData.commandLine.userEdited !== undefined &&
 			toolSpecificData.commandLine.userEdited !== toolSpecificData.commandLine.original
