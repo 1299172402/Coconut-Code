@@ -140,6 +140,44 @@ describe('OpenAIEndpoint - Reasoning Properties', () => {
 	});
 
 	describe('Responses API mode (useResponsesApi = true)', () => {
+		describe('Phase 1 toolSearch contracts', () => {
+			it('preserves explicit toolSearch support when metadata enables it', () => {
+				const endpoint = instaService.createInstance(OpenAIEndpoint,
+					{
+						...modelMetadata,
+						capabilities: {
+							...modelMetadata.capabilities,
+							supports: {
+								...modelMetadata.capabilities.supports,
+								tool_search: true
+							}
+						}
+					},
+					'test-api-key',
+					'https://api.openai.com/v1/chat/completions');
+
+				expect(endpoint.supportsToolSearch).toBe(true);
+			});
+
+			it('falls back to generic model capability detection when metadata is unset', () => {
+				const endpoint = instaService.createInstance(OpenAIEndpoint,
+					{
+						...modelMetadata,
+						capabilities: {
+							...modelMetadata.capabilities,
+							supports: {
+								...modelMetadata.capabilities.supports,
+								tool_search: undefined
+							}
+						}
+					},
+					'test-api-key',
+					'https://api.openai.com/v1/chat/completions');
+
+				expect(endpoint.supportsToolSearch).toBe(false);
+			});
+		});
+
 		it('should preserve reasoning object when thinking is supported', () => {
 			accessor.get(IConfigurationService).setConfig(ConfigKey.ResponsesApiReasoningSummary, 'detailed');
 			const endpoint = instaService.createInstance(OpenAIEndpoint,
@@ -182,6 +220,27 @@ describe('OpenAIEndpoint - Reasoning Properties', () => {
 			const body = endpoint.createRequestBody(options);
 
 			expect(body.reasoning).toBeUndefined(); // Should be removed
+		});
+	});
+
+	describe('Phase 1 toolSearch contracts', () => {
+		it('preserves explicit toolSearch metadata for Chat Completions endpoints', () => {
+			const endpoint = instaService.createInstance(OpenAIEndpoint,
+				{
+					...modelMetadata,
+					supported_endpoints: [ModelSupportedEndpoint.ChatCompletions],
+					capabilities: {
+						...modelMetadata.capabilities,
+						supports: {
+							...modelMetadata.capabilities.supports,
+							tool_search: true
+						}
+					}
+				},
+				'test-api-key',
+				'https://api.openai.com/v1/chat/completions');
+
+			expect(endpoint.supportsToolSearch).toBe(true);
 		});
 	});
 });

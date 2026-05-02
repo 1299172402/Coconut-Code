@@ -138,6 +138,17 @@ suite('defaultIntentRequestHandler', () => {
 		sessionId = generateUuid();
 		sessionResource = Uri.parse(`test://session/${this.sessionId}`);
 		hasHooksEnabled = false;
+		modeInstructions2?: ChatRequest['modeInstructions2'];
+	}
+
+	function createModeInstructions(name: string, content = `${name} instructions`): NonNullable<ChatRequest['modeInstructions2']> {
+		return {
+			name,
+			content,
+			isBuiltin: true,
+			uri: Uri.parse(`test://mode/${name}`),
+			metadata: { version: 1, profile: name },
+		};
 	}
 
 	const responseStream = new ChatResponseStreamImpl(p => response.push(p), () => { }, undefined, undefined, undefined, () => Promise.resolve(undefined));
@@ -191,6 +202,93 @@ suite('defaultIntentRequestHandler', () => {
 		expect(getDerandomizedTelemetry()).toMatchSnapshot();
 	});
 
+	test('passes request-time toolSearch capability through when the endpoint supports it', async () => {
+		const fetchOneSpy = vi.spyOn(fetcher, 'fetchOne');
+		(endpoint as { supportsToolSearch?: boolean }).supportsToolSearch = true;
+		const handler = makeHandler();
+		chatResponse[0] = 'some response here :)';
+		promptResult = {
+			...nullRenderPromptResult(),
+			messages: [{ role: Raw.ChatRole.User, content: [toTextPart('hello world!')] }],
+		};
+
+		await handler.getResult();
+
+		expect(fetchOneSpy).toHaveBeenCalledTimes(1);
+		expect(fetchOneSpy.mock.calls[0][0].modelCapabilities?.enableToolSearch).toBe(true);
+	});
+
+	test('defaults request-time toolSearch capability to false when the endpoint does not expose it', async () => {
+		const fetchOneSpy = vi.spyOn(fetcher, 'fetchOne');
+		(endpoint as { supportsToolSearch?: boolean }).supportsToolSearch = undefined;
+		const handler = makeHandler();
+		chatResponse[0] = 'some response here :)';
+		promptResult = {
+			...nullRenderPromptResult(),
+			messages: [{ role: Raw.ChatRole.User, content: [toTextPart('hello world!')] }],
+		};
+
+		await handler.getResult();
+
+		expect(fetchOneSpy).toHaveBeenCalledTimes(1);
+		expect(fetchOneSpy.mock.calls[0][0].modelCapabilities?.enableToolSearch).toBe(false);
+	});
+
+	test('keeps request-time toolSearch capability false when the endpoint explicitly disables it', async () => {
+		const fetchOneSpy = vi.spyOn(fetcher, 'fetchOne');
+		(endpoint as { supportsToolSearch?: boolean }).supportsToolSearch = false;
+		const handler = makeHandler();
+		chatResponse[0] = 'some response here :)';
+		promptResult = {
+			...nullRenderPromptResult(),
+			messages: [{ role: Raw.ChatRole.User, content: [toTextPart('hello world!')] }],
+		};
+
+		await handler.getResult();
+
+		expect(fetchOneSpy).toHaveBeenCalledTimes(1);
+		expect(fetchOneSpy.mock.calls[0][0].modelCapabilities?.enableToolSearch).toBe(false);
+	});
+
+	test('keeps Responses API modeChanged false when mode instructions are unchanged', async () => {
+		const fetchOneSpy = vi.spyOn(fetcher, 'fetchOne');
+		(endpoint as { apiType?: string }).apiType = 'responses';
+		const request = new TestChatRequest();
+		const previousModeInstructions = createModeInstructions('ask');
+		request.modeInstructions2 = { ...previousModeInstructions, metadata: { ...previousModeInstructions.metadata } };
+		const previousTurn = new Turn(generateUuid(), { message: request.prompt, type: 'user' }, undefined, [], undefined, undefined, false, previousModeInstructions);
+		const handler = makeHandler({ request, turns: [previousTurn] });
+		chatResponse[0] = 'some response here :)';
+		promptResult = {
+			...nullRenderPromptResult(),
+			messages: [{ role: Raw.ChatRole.User, content: [toTextPart('hello world!')] }],
+		};
+
+		await handler.getResult();
+
+		expect(fetchOneSpy).toHaveBeenCalledTimes(1);
+		expect(fetchOneSpy.mock.calls[0][0].modeChanged).toBe(false);
+	});
+
+	test('propagates Responses API modeChanged when mode instructions changed from the previous turn', async () => {
+		const fetchOneSpy = vi.spyOn(fetcher, 'fetchOne');
+		(endpoint as { apiType?: string }).apiType = 'responses';
+		const request = new TestChatRequest();
+		request.modeInstructions2 = createModeInstructions('plan');
+		const previousTurn = new Turn(generateUuid(), { message: request.prompt, type: 'user' }, undefined, [], undefined, undefined, false, createModeInstructions('ask'));
+		const handler = makeHandler({ request, turns: [previousTurn] });
+		chatResponse[0] = 'some response here :)';
+		promptResult = {
+			...nullRenderPromptResult(),
+			messages: [{ role: Raw.ChatRole.User, content: [toTextPart('hello world!')] }],
+		};
+
+		await handler.getResult();
+
+		expect(fetchOneSpy).toHaveBeenCalledTimes(1);
+		expect(fetchOneSpy.mock.calls[0][0].modeChanged).toBe(true);
+	});
+
 	test('propagates resolvedModel into result metadata from a successful response', async () => {
 		fetcher.resolvedModel = 'gpt-4o-resolved';
 		const handler = makeHandler();
@@ -202,46 +300,6 @@ suite('defaultIntentRequestHandler', () => {
 
 		const result = await handler.getResult();
 		expect(result.metadata?.resolvedModel).toBe('gpt-4o-resolved');
-	});
-
-	test('ignores stateful marker when mode instructions changed on responses api requests', async () => {
-		const request = new TestChatRequest();
-		(request as any).modeInstructions2 = { name: 'Agent', content: 'agent instructions', isBuiltin: true };
-		(endpoint as any).apiType = 'responses';
-		const requestSpy = vi.spyOn(endpoint, 'makeChatRequest2');
-		const previousTurn = new Turn(generateUuid(), { message: 'previous', type: 'user' }, undefined, [], undefined, undefined, false, { name: 'Plan', content: 'plan instructions', isBuiltin: true } as any);
-		const handler = makeHandler({ request, turns: [previousTurn] });
-		chatResponse[0] = 'some response here :)';
-		promptResult = {
-			...nullRenderPromptResult(),
-			messages: [{ role: Raw.ChatRole.User, content: [toTextPart('hello world!')] }],
-		};
-
-		await handler.getResult();
-
-		expect(requestSpy).toHaveBeenCalledOnce();
-		expect(requestSpy.mock.calls[0][0].modeChanged).toBe(true);
-		expect(requestSpy.mock.calls[0][0].ignoreStatefulMarker).toBeUndefined();
-	});
-
-	test('preserves default stateful marker behavior when mode instructions are unchanged on responses api requests', async () => {
-		const request = new TestChatRequest();
-		(request as any).modeInstructions2 = { name: 'Agent', content: 'agent instructions', isBuiltin: true };
-		(endpoint as any).apiType = 'responses';
-		const requestSpy = vi.spyOn(endpoint, 'makeChatRequest2');
-		const previousTurn = new Turn(generateUuid(), { message: 'previous', type: 'user' }, undefined, [], undefined, undefined, false, { name: 'Agent', content: 'agent instructions', isBuiltin: true } as any);
-		const handler = makeHandler({ request, turns: [previousTurn] });
-		chatResponse[0] = 'some response here :)';
-		promptResult = {
-			...nullRenderPromptResult(),
-			messages: [{ role: Raw.ChatRole.User, content: [toTextPart('hello world!')] }],
-		};
-
-		await handler.getResult();
-
-		expect(requestSpy).toHaveBeenCalledOnce();
-		expect(requestSpy.mock.calls[0][0].modeChanged).toBe(false);
-		expect(requestSpy.mock.calls[0][0].ignoreStatefulMarker).toBeUndefined();
 	});
 
 	test('makes a tool call turn', async () => {
