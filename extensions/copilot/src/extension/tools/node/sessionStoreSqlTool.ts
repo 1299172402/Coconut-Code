@@ -7,11 +7,15 @@ import * as l10n from '@vscode/l10n';
 import type * as vscode from 'vscode';
 import { IAuthenticationService } from '../../../platform/authentication/common/authentication';
 import { ICopilotTokenManager } from '../../../platform/authentication/common/copilotTokenManager';
-import { ISessionStore } from '../../../platform/chronicle/common/sessionStore';
+import { IChatDebugFileLoggerService } from '../../../platform/chat/common/chatDebugFileLoggerService';
+import { type SessionRow, type RefRow, ISessionStore } from '../../../platform/chronicle/common/sessionStore';
 import { CancellationToken } from '../../../util/vs/base/common/cancellation';
 import { LanguageModelTextPart, LanguageModelToolResult } from '../../../vscodeTypes';
+import { type AnnotatedSession, type AnnotatedRef, type SessionFileInfo, type SessionTurnInfo, SESSIONS_QUERY_SQLITE, buildRefsQuery, buildFilesQuery, buildTurnsQuery, buildStandupPrompt } from '../../chronicle/common/standupPrompt';
 import { SessionIndexingPreference } from '../../chronicle/common/sessionIndexingPreference';
 import { CloudSessionStoreClient } from '../../chronicle/node/cloudSessionStoreClient';
+import { reindexSessions } from '../../chronicle/node/sessionReindexer';
+import { IRunCommandExecutionService } from '../../../platform/commands/common/runCommandExecutionService';
 import { IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { IFetcherService } from '../../../platform/networking/common/fetcherService';
 import { ITelemetryService } from '../../../platform/telemetry/common/telemetry';
@@ -30,9 +34,48 @@ const BLOCKED_PATTERNS = [
 ];
 
 export interface SessionStoreSqlParams {
-	readonly query: string;
+	readonly action?: 'query' | 'standup' | 'reindex';
+	readonly query?: string;
+	readonly force?: boolean;
 	readonly description: string;
 }
+
+/** Cloud SQL dialect sessions query. */
+const SESSIONS_QUERY_CLOUD = `SELECT *
+	FROM sessions
+	WHERE updated_at >= now() - INTERVAL '1 day'
+	ORDER BY updated_at DESC
+	LIMIT 100`;
+
+/** Model description when cloud sync is enabled — uses DuckDB SQL syntax. */
+const CLOUD_MODEL_DESCRIPTION = `Interact with the cloud session store containing history from ALL past coding sessions across all devices and agents (VS Code, CLI, Copilot Coding Agent, PR reviews).
+
+Supports three actions via the \`action\` parameter:
+
+**action: 'query' (default)** — Execute a read-only DuckDB SQL query. Use this proactively when the user asks about what they've worked on, prior approaches, project history, sessions linked to PRs/issues/commits, or temporal queries.
+
+**IMPORTANT: Uses DuckDB SQL syntax.**
+- Date arithmetic: \`now() - INTERVAL '1 day'\`, \`now() - INTERVAL '7 days'\`
+- Use \`ILIKE\` (case-insensitive) for text search — no FTS5/MATCH
+- Use \`date_diff('minute', start, end)\` for duration calculations
+- Always use \`COALESCE()\` or \`WHERE column IS NOT NULL\` to guard against NULL values — many columns are nullable
+- GROUP BY is strict: every non-aggregated column in SELECT must appear in GROUP BY, or use \`ANY_VALUE(col)\` for columns where the exact value is not important
+- When using expressions like \`date_diff()\` in both SELECT and WHERE/HAVING, repeat the full expression — DuckDB does not allow aliases in WHERE
+- Only one query per call — do not combine multiple statements with semicolons
+
+Schema:
+- sessions — id, repository, branch, summary, agent_name (e.g. 'VS Code', 'cli', 'Copilot Coding Agent', 'Copilot Code Review'), agent_description, created_at, updated_at (TIMESTAMP). NOTE: cwd is always NULL in cloud. Always filter on updated_at (not created_at) for time ranges.
+- turns — session_id, turn_index, user_message, assistant_response, timestamp (TIMESTAMP). The richest source of what happened — always JOIN with sessions.
+- checkpoints — session_id, checkpoint_number, title, overview, created_at (TIMESTAMP)
+- session_files — session_id, file_path, tool_name (edit/create), turn_index, first_seen_at (TIMESTAMP)
+- session_refs — session_id, ref_type (commit/pr/issue), ref_value, turn_index, created_at (TIMESTAMP)
+- events — raw event table. Key columns: session_id, timestamp, type, user_content, assistant_content, tool_start_name, tool_complete_success, tool_complete_result_content, usage_model, usage_input_tokens, usage_output_tokens
+- tool_requests — session_id, tool_call_id, name, arguments_json
+- search_index — not available in cloud. Use ILIKE for text search instead.
+
+**action: 'standup'** — Pre-fetches last 24 hours of sessions, turns, files, and refs (merging local and cloud data). Returns a formatted data blob ready for standup summarisation. No \`query\` parameter needed.
+
+**action: 'reindex'** — Rebuilds the local session store by re-reading debug logs from disk, then syncs to cloud if enabled. Returns before/after stats. No \`query\` parameter needed.`;
 
 class SessionStoreSqlTool implements ICopilotTool<SessionStoreSqlParams> {
 	public static readonly toolName = ToolName.SessionStoreSql;
@@ -47,6 +90,8 @@ class SessionStoreSqlTool implements ICopilotTool<SessionStoreSqlParams> {
 		@IConfigurationService configService: IConfigurationService,
 		@ITelemetryService private readonly _telemetryService: ITelemetryService,
 		@IFetcherService private readonly _fetcherService: IFetcherService,
+		@IChatDebugFileLoggerService private readonly _debugLogService: IChatDebugFileLoggerService,
+		@IRunCommandExecutionService private readonly _runCommandService: IRunCommandExecutionService,
 	) {
 		this._indexingPreference = new SessionIndexingPreference(configService);
 	}
@@ -55,8 +100,20 @@ class SessionStoreSqlTool implements ICopilotTool<SessionStoreSqlParams> {
 		options: vscode.LanguageModelToolInvocationOptions<SessionStoreSqlParams>,
 		token: CancellationToken,
 	): Promise<vscode.LanguageModelToolResult> {
+		const action = options.input.action ?? 'query';
+
+		switch (action) {
+			case 'standup':
+				return this._invokeStandup(token);
+			case 'reindex':
+				return this._invokeReindex(options.input.force ?? false, token);
+			default:
+				return this._invokeQuery(options.input.query ?? '', token);
+		}
+	}
+	private async _invokeQuery(rawQuery: string, token: CancellationToken): Promise<vscode.LanguageModelToolResult> {
 		// Strip trailing semicolons — models often append them
-		const sql = options.input.query.trim().replace(/;+\s*$/, '');
+		const sql = rawQuery.trim().replace(/;+\s*$/, '');
 
 		if (!sql) {
 			return new LanguageModelToolResult([new LanguageModelTextPart('Error: Empty query provided.')]);
@@ -67,7 +124,7 @@ class SessionStoreSqlTool implements ICopilotTool<SessionStoreSqlParams> {
 			if (pattern.test(sql)) {
 				this._sendTelemetry('blocked', 0, 0, false, 'blocked_mutating_sql');
 				return new LanguageModelToolResult([
-					new LanguageModelTextPart(`Error: Blocked SQL statement. Only SELECT queries are allowed.`),
+					new LanguageModelTextPart('Error: Blocked SQL statement. Only SELECT queries are allowed.'),
 				]);
 			}
 		}
@@ -90,15 +147,33 @@ class SessionStoreSqlTool implements ICopilotTool<SessionStoreSqlParams> {
 			const startTime = Date.now();
 
 			if (hasCloud) {
+				// Cloud is enabled — model receives DuckDB description via alternativeDefinition
 				source = 'cloud';
 				const client = new CloudSessionStoreClient(this._tokenManager, this._authService, this._fetcherService);
-				const result = await client.executeQuery(sql);
-				if (!result) {
-					this._sendTelemetry(source, 0, Date.now() - startTime, false, 'empty_result');
-					return new LanguageModelToolResult([new LanguageModelTextPart('Error: Cloud query returned no result.')]);
+				const cloudResult = await client.executeQuery(sql);
+
+				if (cloudResult && 'error' in cloudResult) {
+					// Cloud query failed — surface the error so model can fix its query
+					this._sendTelemetry('cloud', 0, Date.now() - startTime, false, cloudResult.error.substring(0, 100));
+					return new LanguageModelToolResult([new LanguageModelTextPart(
+						`Error from cloud: ${cloudResult.error}\n\nReminder: Cloud uses DuckDB SQL syntax. Use \`now() - INTERVAL '1 day'\` for date math, \`ILIKE\` for text search (no FTS5/MATCH).`
+					)]);
+				} else if (!cloudResult) {
+					// Auth/network failure — fall back to local
+					source = 'local_fallback';
+					try {
+						rows = this._sessionStore.executeReadOnly(sql);
+					} catch (authErr) {
+						if (authErr instanceof Error && authErr.message.includes('authorizer')) {
+							rows = this._sessionStore.executeReadOnlyFallback(sql);
+						} else {
+							throw authErr;
+						}
+					}
+				} else {
+					rows = cloudResult.rows;
+					truncated = cloudResult.truncated;
 				}
-				rows = result.rows;
-				truncated = result.truncated;
 			} else {
 				source = 'local';
 				try {
@@ -127,6 +202,266 @@ class SessionStoreSqlTool implements ICopilotTool<SessionStoreSqlParams> {
 			const message = err instanceof Error ? err.message : String(err);
 			this._sendTelemetry(hasCloud ? 'cloud' : 'local', 0, 0, false, message.substring(0, 100));
 			return new LanguageModelToolResult([new LanguageModelTextPart(`Error: ${message}`)]);
+		}
+	}
+
+	/**
+	 * Standup action: pre-fetch last 24h sessions + turns + files + refs,
+	 * merge local/cloud, dedup, and return formatted data for the model to summarise.
+	 */
+	private async _invokeStandup(_token: CancellationToken): Promise<vscode.LanguageModelToolResult> {
+		const startTime = Date.now();
+
+		try {
+			// Always query local SQLite (has current machine's sessions)
+			const localSessions = this._queryLocalStore();
+
+			// Query cloud if user has cloud consent
+			let cloudSessions: { sessions: AnnotatedSession[]; refs: AnnotatedRef[] } = { sessions: [], refs: [] };
+			if (this._indexingPreference.hasCloudConsent()) {
+				cloudSessions = await this._queryCloudStore();
+			}
+
+			// Merge and dedup by session ID (cloud wins on conflict)
+			const seenIds = new Set<string>();
+			const sessions: AnnotatedSession[] = [];
+			const refs: AnnotatedRef[] = [];
+
+			for (const s of cloudSessions.sessions) {
+				if (!seenIds.has(s.id)) {
+					seenIds.add(s.id);
+					sessions.push(s);
+				}
+			}
+			for (const s of localSessions.sessions) {
+				if (!seenIds.has(s.id)) {
+					seenIds.add(s.id);
+					sessions.push(s);
+				}
+			}
+
+			const seenRefs = new Set<string>();
+			for (const r of [...cloudSessions.refs, ...localSessions.refs]) {
+				const key = `${r.session_id}:${r.ref_type}:${r.ref_value}`;
+				if (!seenRefs.has(key)) {
+					seenRefs.add(key);
+					refs.push(r);
+				}
+			}
+
+			// Sort by updated_at descending, cap to 20
+			sessions.sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? ''));
+			const capped = sessions.slice(0, 20);
+			const cappedIds = new Set(capped.map(s => s.id));
+			const cappedRefs = refs.filter(r => cappedIds.has(r.session_id));
+
+			// Fetch turns and files for capped sessions
+			let cappedTurns: SessionTurnInfo[] = [];
+			let cappedFiles: SessionFileInfo[] = [];
+			if (capped.length > 0) {
+				const ids = capped.map(s => s.id);
+				try {
+					cappedTurns = this._sessionStore.executeReadOnlyFallback(buildTurnsQuery(ids)) as unknown as SessionTurnInfo[];
+				} catch { /* non-fatal */ }
+				try {
+					cappedFiles = this._sessionStore.executeReadOnlyFallback(buildFilesQuery(ids)) as unknown as SessionFileInfo[];
+				} catch { /* non-fatal */ }
+
+				if (this._indexingPreference.hasCloudConsent()) {
+					const cloudDetail = await this._queryCloudTurnsAndFiles(ids);
+
+					if (cloudDetail.turns.length > 0) {
+						const seenTurns = new Set(cappedTurns.map(t => `${t.session_id}:${t.turn_index}`));
+						for (const t of cloudDetail.turns) {
+							if (!seenTurns.has(`${t.session_id}:${t.turn_index}`)) {
+								cappedTurns.push(t);
+							}
+						}
+					}
+
+					if (cloudDetail.files.length > 0) {
+						const seenFiles = new Set(cappedFiles.map(f => `${f.session_id}:${f.file_path}`));
+						for (const f of cloudDetail.files) {
+							if (!seenFiles.has(`${f.session_id}:${f.file_path}`)) {
+								cappedFiles.push(f);
+							}
+						}
+					}
+				}
+			}
+
+			const prompt = buildStandupPrompt(capped, cappedRefs, cappedTurns, cappedFiles);
+			this._sendTelemetry('standup', capped.length, Date.now() - startTime, true);
+			return new LanguageModelToolResult([new LanguageModelTextPart(prompt)]);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			this._sendTelemetry('standup', 0, Date.now() - startTime, false, message.substring(0, 100));
+			return new LanguageModelToolResult([new LanguageModelTextPart(`Error fetching standup data: ${message}`)]);
+		}
+	}
+
+	/**
+	 * Reindex action: rebuild the local session store from debug logs,
+	 * then trigger cloud sync if enabled.
+	 */
+	private async _invokeReindex(force: boolean, token: CancellationToken): Promise<vscode.LanguageModelToolResult> {
+		const startTime = Date.now();
+
+		try {
+			const statsBefore = this._sessionStore.getStats();
+
+			const result = await reindexSessions(
+				this._sessionStore,
+				this._debugLogService,
+				() => { /* progress not streamed for tool results */ },
+				token,
+				force,
+			);
+
+			const statsAfter = this._sessionStore.getStats();
+
+			const lines: string[] = [];
+			if (result.cancelled) {
+				lines.push('Reindex cancelled.');
+			} else {
+				lines.push('Local reindex complete.');
+			}
+
+			lines.push('');
+			lines.push('| | Before | After | Delta |');
+			lines.push('|---|---|---|---|');
+			lines.push(`| Sessions | ${statsBefore.sessions} | ${statsAfter.sessions} | +${statsAfter.sessions - statsBefore.sessions} |`);
+			lines.push(`| Turns | ${statsBefore.turns} | ${statsAfter.turns} | +${statsAfter.turns - statsBefore.turns} |`);
+			lines.push(`| Files | ${statsBefore.files} | ${statsAfter.files} | +${statsAfter.files - statsBefore.files} |`);
+			lines.push(`| Refs | ${statsBefore.refs} | ${statsAfter.refs} | +${statsAfter.refs - statsBefore.refs} |`);
+			lines.push('');
+			lines.push(`${result.processed} session(s) processed, ${result.skipped} skipped.`);
+
+			// Cloud reindex phase — gated by cloud sync settings in RemoteSessionExporter
+			if (!result.cancelled && !token.isCancellationRequested) {
+				try {
+					const cloudResult = await this._runCommandService.executeCommand(
+						'github.copilot.sessionSync.reindex',
+						() => { /* progress not streamed for tool results */ },
+						token,
+					) as { created: number; eventsUploaded: number; failed: number; backfillQueued: number } | undefined;
+					if (cloudResult && cloudResult.created > 0) {
+						lines.push(`${cloudResult.created} session(s) synced to cloud.`);
+					}
+				} catch {
+					// Cloud phase failure is non-fatal — local reindex already succeeded
+				}
+			}
+
+			this._sendTelemetry('reindex', result.processed, Date.now() - startTime, true);
+			return new LanguageModelToolResult([new LanguageModelTextPart(lines.join('\n'))]);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			this._sendTelemetry('reindex', 0, Date.now() - startTime, false, message.substring(0, 100));
+			return new LanguageModelToolResult([new LanguageModelTextPart(`Error during reindex: ${message}`)]);
+		}
+	}
+
+	/**
+	 * Query the local SQLite session store for sessions and refs.
+	 */
+	private _queryLocalStore(): { sessions: AnnotatedSession[]; refs: AnnotatedRef[] } {
+		try {
+			const rawSessions = this._sessionStore.executeReadOnlyFallback(SESSIONS_QUERY_SQLITE) as unknown as SessionRow[];
+			const sessions: AnnotatedSession[] = rawSessions.map(s => ({ ...s, source: 'vscode' as const }));
+
+			let refs: AnnotatedRef[] = [];
+			if (sessions.length > 0) {
+				const ids = sessions.map(s => s.id);
+				const rawRefs = this._sessionStore.executeReadOnlyFallback(buildRefsQuery(ids)) as unknown as RefRow[];
+				refs = rawRefs.map(r => ({ ...r, source: 'vscode' as const }));
+			}
+
+			return { sessions, refs };
+		} catch {
+			return { sessions: [], refs: [] };
+		}
+	}
+
+	private async _queryCloudStore(): Promise<{ sessions: AnnotatedSession[]; refs: AnnotatedRef[] }> {
+		const empty = { sessions: [] as AnnotatedSession[], refs: [] as AnnotatedRef[] };
+		try {
+			const client = new CloudSessionStoreClient(this._tokenManager, this._authService, this._fetcherService);
+
+			const sessionsResult = await client.executeQuery(SESSIONS_QUERY_CLOUD);
+			if (!sessionsResult || 'error' in sessionsResult || sessionsResult.rows.length === 0) {
+				return empty;
+			}
+
+			const sessions: AnnotatedSession[] = sessionsResult.rows.map(r => ({
+				id: r.id as string,
+				summary: r.summary as string | undefined,
+				branch: r.branch as string | undefined,
+				repository: r.repository as string | undefined,
+				agent_name: r.agent_name as string | undefined,
+				agent_description: r.agent_description as string | undefined,
+				created_at: r.created_at as string | undefined,
+				updated_at: r.updated_at as string | undefined,
+				source: 'cloud' as const,
+			}));
+
+			const ids = sessions.map(s => s.id);
+			let refs: AnnotatedRef[] = [];
+			try {
+				const refsQuery = `SELECT session_id, ref_type, ref_value FROM session_refs WHERE session_id IN (${ids.map(s => `'${s.replace(/'/g, '\'\'')}'`).join(',')})`;
+				const refsResult = await client.executeQuery(refsQuery);
+				if (refsResult && !('error' in refsResult) && refsResult.rows.length > 0) {
+					refs = refsResult.rows.map(r => ({
+						session_id: r.session_id as string,
+						ref_type: r.ref_type as 'commit' | 'pr' | 'issue',
+						ref_value: r.ref_value as string,
+						source: 'cloud' as const,
+					}));
+				}
+			} catch { /* non-fatal */ }
+
+			return { sessions, refs };
+		} catch {
+			return empty;
+		}
+	}
+
+	private async _queryCloudTurnsAndFiles(sessionIds: string[]): Promise<{ turns: SessionTurnInfo[]; files: SessionFileInfo[] }> {
+		const empty = { turns: [] as SessionTurnInfo[], files: [] as SessionFileInfo[] };
+		try {
+			const client = new CloudSessionStoreClient(this._tokenManager, this._authService, this._fetcherService);
+			const inClause = sessionIds.map(s => `'${s.replace(/'/g, '\'\'')}'`).join(',');
+
+			let turns: SessionTurnInfo[] = [];
+			try {
+				const turnsQuery = `SELECT session_id, turn_index, substring(user_message, 1, 120) as user_message, substring(assistant_response, 1, 200) as assistant_response FROM turns WHERE session_id IN (${inClause}) AND (user_message IS NOT NULL OR assistant_response IS NOT NULL) ORDER BY session_id, turn_index LIMIT 200`;
+				const turnsResult = await client.executeQuery(turnsQuery);
+				if (turnsResult && !('error' in turnsResult) && turnsResult.rows.length > 0) {
+					turns = turnsResult.rows.map(r => ({
+						session_id: r.session_id as string,
+						turn_index: r.turn_index as number,
+						user_message: r.user_message as string | undefined,
+						assistant_response: r.assistant_response as string | undefined,
+					}));
+				}
+			} catch { /* non-fatal */ }
+
+			let files: SessionFileInfo[] = [];
+			try {
+				const filesQuery = `SELECT session_id, file_path, tool_name FROM session_files WHERE session_id IN (${inClause}) LIMIT 200`;
+				const filesResult = await client.executeQuery(filesQuery);
+				if (filesResult && !('error' in filesResult) && filesResult.rows.length > 0) {
+					files = filesResult.rows.map(r => ({
+						session_id: r.session_id as string,
+						file_path: r.file_path as string,
+						tool_name: r.tool_name as string | undefined,
+					}));
+				}
+			} catch { /* non-fatal */ }
+
+			return { turns, files };
+		} catch {
+			return empty;
 		}
 	}
 
@@ -161,12 +496,39 @@ class SessionStoreSqlTool implements ICopilotTool<SessionStoreSqlParams> {
 	}
 
 	prepareInvocation(
-		_options: vscode.LanguageModelToolInvocationPrepareOptions<SessionStoreSqlParams>,
+		options: vscode.LanguageModelToolInvocationPrepareOptions<SessionStoreSqlParams>,
 		_token: CancellationToken,
 	) {
+		const action = options.input.action ?? 'query';
+		switch (action) {
+			case 'standup':
+				return {
+					invocationMessage: l10n.t('Fetching standup data'),
+					pastTenseMessage: l10n.t('Fetched standup data'),
+				};
+			case 'reindex':
+				return {
+					invocationMessage: l10n.t('Reindexing session store'),
+					pastTenseMessage: l10n.t('Reindexed session store'),
+				};
+			default:
+				return {
+					invocationMessage: l10n.t('Querying session store'),
+					pastTenseMessage: l10n.t('Queried session store'),
+				};
+		}
+	}
+
+	alternativeDefinition(tool: vscode.LanguageModelToolInformation): vscode.LanguageModelToolInformation {
+		const hasCloud = this._indexingPreference.hasCloudConsent();
+		if (!hasCloud) {
+			return tool;
+		}
+
+		// When cloud is enabled, swap the description to use DuckDB syntax
 		return {
-			invocationMessage: l10n.t('Querying session store'),
-			pastTenseMessage: l10n.t('Queried session store'),
+			...tool,
+			description: CLOUD_MODEL_DESCRIPTION,
 		};
 	}
 }
